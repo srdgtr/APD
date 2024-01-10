@@ -123,6 +123,13 @@ date_now = datetime.now().strftime("%c").replace(":", "-")
 
 beekman_basis.to_csv("APD_" + date_now + ".csv", index=False, encoding="utf-8-sig")
 
+get_orgineel_numbers = pd.read_csv(max(Path.cwd().glob("beekman*.csv"), key=os.path.getctime),sep=";", low_memory=False,usecols=["EAN barcode","EAN_extra_1","Origineel nr"]).rename(columns={"Origineel nr":'origineel_nr'})
+
+normale_ean = get_orgineel_numbers[['origineel_nr', 'EAN barcode']].rename(columns={'EAN barcode': 'ean'})
+extra_ean = get_orgineel_numbers[['origineel_nr', 'EAN_extra_1']].rename(columns={'EAN_extra_1': 'ean'})
+beekman_orgineelnummers = pd.concat([normale_ean, extra_ean]).dropna(subset=['ean']).set_index('ean')
+beekman_orgineelnummers.to_sql(name="orgineelnummers", con=odin_db, if_exists="replace")
+
 os.remove("beekman.csv")
 
 latest_file = max(Path.cwd().glob("APD_*.csv"), key=os.path.getctime)
@@ -141,10 +148,6 @@ apd_info = beekman.rename(
         "stock": "voorraad",
     }
 )
-
-beekman_orgineelnummers = beekman[["ean", "id"]]
-
-beekman_orgineelnummers.to_sql(name="orgineelnummers", con=odin_db, if_exists="replace",index=False)
 
 odin_db.dispose()
 engine.dispose()
