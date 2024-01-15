@@ -127,8 +127,9 @@ get_orgineel_numbers = pd.read_csv(max(Path.cwd().glob("beekman*.csv"), key=os.p
 
 normale_ean = get_orgineel_numbers[['origineel_nr', 'EAN barcode']].rename(columns={'EAN barcode': 'ean'})
 extra_ean = get_orgineel_numbers[['origineel_nr', 'EAN_extra_1']].rename(columns={'EAN_extra_1': 'ean'})
-beekman_orgineelnummers = pd.concat([normale_ean, extra_ean]).dropna(subset=['ean']).set_index('ean')
+beekman_orgineelnummers = pd.concat([normale_ean, extra_ean]).dropna(subset=['ean']).assign(ean=lambda x: pd.to_numeric(x["ean"].str.replace(r"[^\d]", "", regex=True)).astype(int)).set_index('ean')
 beekman_orgineelnummers.to_sql(name="orgineelnummers", con=odin_db, if_exists="replace")
+
 
 os.remove("beekman.csv")
 
@@ -137,6 +138,8 @@ with open(latest_file, "rb") as f:
     dbx.files_upload(
         f.read(), "/macro/datafiles/APD/" + latest_file.name, mode=dropbox.files.WriteMode("overwrite", None), mute=True
     )
+
+beekman_basis[['sku', 'price']].rename(columns={'price': 'Inkoopprijs exclusief'}).to_csv("APD_Vendit_price_kaal.csv", index=False, encoding="utf-8-sig")
 
 apd_info = beekman.rename(
     columns={
