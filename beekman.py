@@ -12,21 +12,13 @@ import configparser
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path.home()))
+sys.path.insert(0, str(Path.cwd().parent))
 from bol_export_file import get_file
+from import_leveranciers.import_data import insert_data, engine
 
-dbx = dropbox.Dropbox(os.environ.get("DROPBOX"))
 ini_config = configparser.ConfigParser(interpolation=None)
 ini_config.read(Path.home() / "bol_export_files.ini")
 config_db = dict(
-    drivername="mariadb",
-    username=ini_config.get("database leveranciers", "user"),
-    password=ini_config.get("database leveranciers", "password"),
-    host=ini_config.get("database leveranciers", "host"),
-    port=ini_config.get("database leveranciers", "port"),
-    database=ini_config.get("database leveranciers", "database"),
-)
-config_db_odin = dict(
     drivername="mariadb",
     username=ini_config.get("database odin", "user"),
     password=ini_config.get("database odin", "password"),
@@ -34,17 +26,21 @@ config_db_odin = dict(
     port=ini_config.get("database odin", "port"),
     database=ini_config.get("database odin", "database"),
 )
-engine = create_engine(URL.create(**config_db))
-odin_db = create_engine(URL.create(**config_db_odin))
-current_folder = Path.cwd().name.upper()
-korting_percent = int(ini_config.get("stap 1 vaste korting", current_folder.lower()).strip("%"))
+dropbox_key = os.environ.get("DROPBOX")
+if not dropbox_key:
+    dropbox_key = ini_config.get("dropbox", "api_dropbox")
 
-beekman_file = requests.get(ini_config.get("beekman", "voorraad_url")).content
+dbx = dropbox.Dropbox(dropbox_key)
+engine = create_engine(URL.create(**config_db))
+scraper_name = Path.cwd().name
+korting_percent = int(ini_config.get("stap 1 vaste korting", scraper_name.lower()).strip("%"))
+
+voorraad_file = requests.get(ini_config.get("beekman", "voorraad_url")).content
 
 with open("beekman.csv", "wb") as f:
-    f.write(beekman_file)
+    f.write(voorraad_file)
 
-beekman = (
+voorraad = (
     pd.read_csv(
         max(Path.cwd().glob("beekman*.csv"), key=os.path.getctime),
         sep=";",
@@ -83,7 +79,7 @@ beekman = (
     .assign(
         aantal_verkoop_eenheden=lambda x: x["Aantal verkoop eenheden"].fillna(0).astype(int).multiply(5),
         stock=lambda x: np.where(x["stock"] == 0, x["aantal_verkoop_eenheden"], x["stock"]),
-        eigen_sku=lambda x: "APD" + x["sku"],
+        eigen_sku=lambda x: scraper_name + x["sku"],
         ean=lambda x: pd.to_numeric(x["EAN barcode"].fillna(x["EAN_extra_1"]), errors="coerce")
         .astype("Int64")
         .fillna(0),
@@ -117,40 +113,43 @@ beekman = (
 )
 
 
-beekman_basis = beekman[["sku", "ean", "brand", "id", "group", "info", "stock", "price", "price_going", "lk"]]
+basis_voorraad = voorraad[["sku", "ean", "brand", "id", "group", "info", "stock", "price", "price_going", "lk"]]
 
 date_now = datetime.now().strftime("%c").replace(":", "-")
 
-beekman_basis.to_csv("APD_" + date_now + ".csv", index=False, encoding="utf-8-sig")
+basis_voorraad.to_csv(f"{scraper_name}_{date_now}.csv", index=False, encoding="utf-8-sig")
 
 get_orgineel_numbers = pd.read_csv(max(Path.cwd().glob("beekman*.csv"), key=os.path.getctime),sep=";", low_memory=False,usecols=["EAN barcode","EAN_extra_1","Origineel nr"]).rename(columns={"Origineel nr":'origineel_nr'})
 
 normale_ean = get_orgineel_numbers[['origineel_nr', 'EAN barcode']].rename(columns={'EAN barcode': 'ean'})
 extra_ean = get_orgineel_numbers[['origineel_nr', 'EAN_extra_1']].rename(columns={'EAN_extra_1': 'ean'})
-beekman_orgineelnummers = pd.concat([normale_ean, extra_ean]).dropna(subset=['ean']).assign(ean=lambda x: pd.to_numeric(x["ean"].str.replace(r"[^\d]", "", regex=True)).astype(int)).set_index('ean')
-beekman_orgineelnummers.to_sql(name="orgineelnummers", con=odin_db, if_exists="replace")
-
+orgineelnummers = pd.concat([normale_ean, extra_ean]).dropna(subset=['ean']).assign(ean=lambda x: pd.to_numeric(x["ean"].str.replace(r"[^\d]", "", regex=True)).astype(int)).set_index('ean')
+orgineelnummers.to_sql(name="orgineelnummers", con=engine, if_exists="replace")
 
 os.remove("beekman.csv")
 
-latest_file = max(Path.cwd().glob("APD_*.csv"), key=os.path.getctime)
+latest_file = max(Path.cwd().glob(f"{scraper_name}_*.csv"), key=os.path.getctime)
 with open(latest_file, "rb") as f:
     dbx.files_upload(
-        f.read(), "/macro/datafiles/APD/" + latest_file.name, mode=dropbox.files.WriteMode("overwrite", None), mute=True
+        f.read(), f"/macro/datafiles/{scraper_name}/" + latest_file.name, mode=dropbox.files.WriteMode("overwrite", None), mute=True
     )
 
-beekman_basis[['sku', 'price']].rename(columns={'price': 'Inkoopprijs exclusief'}).to_csv("APD_Vendit_price_kaal.csv", index=False, encoding="utf-8-sig")
+basis_voorraad[['sku', 'price']].rename(columns={'price': 'Inkoopprijs exclusief'}).to_csv(f"{scraper_name}_Vendit_price_kaal.csv", index=False, encoding="utf-8-sig")
 
-apd_info = beekman.rename(
+product_info = basis_voorraad.rename(
     columns={
+        # "ean":"ean",
         "brand": "merk",
-        "group": "category",
-        "info": "product_omschrijving",
-        "price": "prijs",
-        "price_going": "advies_prijs",
         "stock": "voorraad",
+        "price": "inkoop_prijs",
+        # :"promo_inkoop_prijs",
+        # :"promo_inkoop_actief",
+        # "": "advies_prijs",
+        "info": "omschrijving",
     }
-)
+).assign(onze_sku=lambda x: scraper_name + x["sku"], import_date=datetime.now())
 
-odin_db.dispose()
+insert_data(engine, product_info)
+
 engine.dispose()
+
