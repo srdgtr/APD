@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, str(Path.cwd().parent))
 from bol_export_file import get_file
-from import_leveranciers.import_data import insert_data, engine
+from process_results.process_data import save_to_db, save_to_dropbox
 
 ini_config = configparser.ConfigParser(interpolation=None)
 ini_config.read(Path.home() / "bol_export_files.ini")
@@ -26,11 +26,6 @@ config_db = dict(
     port=ini_config.get("database odin", "port"),
     database=ini_config.get("database odin", "database"),
 )
-dropbox_key = os.environ.get("DROPBOX")
-if not dropbox_key:
-    dropbox_key = ini_config.get("dropbox", "api_dropbox")
-
-dbx = dropbox.Dropbox(dropbox_key)
 engine = create_engine(URL.create(**config_db))
 scraper_name = Path.cwd().name
 korting_percent = int(ini_config.get("stap 1 vaste korting", scraper_name.lower()).strip("%"))
