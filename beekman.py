@@ -129,10 +129,7 @@ orgineelnummers.to_sql(name="orgineelnummers", con=engine, if_exists="replace")
 os.remove("beekman.csv")
 
 latest_file = max(Path.cwd().glob(f"{scraper_name}_*.csv"), key=os.path.getctime)
-with open(latest_file, "rb") as f:
-    dbx.files_upload(
-        f.read(), f"/macro/datafiles/{scraper_name}/" + latest_file.name, mode=dropbox.files.WriteMode("overwrite", None), mute=True
-    )
+save_to_dropbox(latest_file, scraper_name)
 
 basis_voorraad[['sku', 'price']].rename(columns={'price': 'Inkoopprijs exclusief'}).to_csv(f"{scraper_name}_Vendit_price_kaal.csv", index=False, encoding="utf-8-sig")
 
@@ -145,11 +142,10 @@ product_info = basis_voorraad.rename(
         # :"promo_inkoop_prijs",
         # :"promo_inkoop_actief",
         # "": "advies_prijs",
+        "group" :"category",
         "info": "omschrijving",
     }
 ).assign(onze_sku=lambda x: scraper_name + x["sku"], import_date=datetime.now())
 
-insert_data(engine, product_info)
-
-engine.dispose()
+save_to_db(product_info)
 
