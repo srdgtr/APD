@@ -56,6 +56,8 @@ voorraad = (
             "Groep": "group",
             "Consumenten prijs incl btw": "price_going",
             "Inkoop prijs excl btw": "price",
+            "Staffel 1 Inkoop prijs excl btw": "price1",
+            "Staffel 2 Inkoop prijs excl btw": "price2",
         }
     )
     .assign(
@@ -81,7 +83,7 @@ voorraad = (
         lange_omschrijving="",
         verpakings_eenheid="",
         lk=lambda x: (korting_percent * x["price"] / 100).round(2),
-        price=lambda x: (x["price"] - x["lk"]).round(2),
+        price=lambda x: (x["price2"].fillna(x["price1"].fillna(x["price"] - x["lk"]))).round(2),
         group=lambda x: x.group.fillna(""),
     )
     .assign(
@@ -106,24 +108,31 @@ voorraad = (
     )
 )
 
-
 basis_voorraad = voorraad[["sku", "ean", "brand", "id", "group", "info", "stock", "price", "price_going", "lk"]]
 
 date_now = datetime.now().strftime("%c").replace(":", "-")
 
 basis_voorraad.to_csv(f"{scraper_name}_{date_now}.csv", index=False, encoding="utf-8-sig")
 
+latest_file = max(Path.cwd().glob(f"{scraper_name}_*.csv"), key=os.path.getctime)
+save_to_dropbox(latest_file, scraper_name)
 get_orgineel_numbers = pd.read_csv(max(Path.cwd().glob("beekman*.csv"), key=os.path.getctime),sep=";", low_memory=False,usecols=["EAN barcode","EAN_extra_1","Origineel nr"]).rename(columns={"Origineel nr":'origineel_nr'})
 
 normale_ean = get_orgineel_numbers[['origineel_nr', 'EAN barcode']].rename(columns={'EAN barcode': 'ean'})
 extra_ean = get_orgineel_numbers[['origineel_nr', 'EAN_extra_1']].rename(columns={'EAN_extra_1': 'ean'})
-orgineelnummers = pd.concat([normale_ean, extra_ean]).dropna(subset=['ean']).assign(ean=lambda x: pd.to_numeric(x["ean"].str.replace(r"[^\d]", "", regex=True)).astype(int)).set_index('ean')
+orgineelnummers = (
+    pd.concat([normale_ean, extra_ean])
+    .dropna(subset=['ean']) 
+    .query('ean.str.isdigit()')  # Keep only rows where 'ean' is all digits
+    .assign(ean=lambda x: pd.to_numeric(x['ean'], errors='coerce'))  
+    .query('ean.notna() & ean <= 999999999999999') 
+    .astype({'ean': 'int'})
+    .set_index('ean')
+)
 orgineelnummers.to_sql(name="orgineelnummers", con=engine, if_exists="replace")
 
 os.remove("beekman.csv")
 
-latest_file = max(Path.cwd().glob(f"{scraper_name}_*.csv"), key=os.path.getctime)
-save_to_dropbox(latest_file, scraper_name)
 
 basis_voorraad[['sku', 'price']].rename(columns={'price': 'Inkoopprijs exclusief'}).to_csv(f"{scraper_name}_Vendit_price_kaal.csv", index=False, encoding="utf-8-sig")
 
