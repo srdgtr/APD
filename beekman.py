@@ -1,10 +1,12 @@
 # voorraad file changes multiple times a day on server
 
 import os
+import importlib
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import requests
+import httpx
+from typing import Optional
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import URL
 import configparser
@@ -29,7 +31,77 @@ engine = create_engine(URL.create(**config_db))
 scraper_name = Path.cwd().name
 korting_percent = int(ini_config.get("stap 1 vaste korting", scraper_name.lower()).strip("%"))
 
-voorraad_file = requests.get(ini_config.get("beekman", "voorraad_url")).content
+
+def _is_cloudflare_challenge(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "").lower()
+    body_start = response.content[:4000].lower()
+    html_like = "text/html" in content_type or body_start.startswith(b"<!doctype html")
+    challenge_markers = (
+        b"just a moment",
+        b"cdn-cgi/challenge-platform",
+        b"enable javascript and cookies to continue",
+        b"_cf_chl_opt",
+    )
+    return html_like and any(marker in body_start for marker in challenge_markers)
+
+
+def _download_with_playwright(url: str, timeout_seconds: int = 60) -> Optional[bytes]:
+    try:
+        sync_api = importlib.import_module("playwright.sync_api")
+        sync_playwright = sync_api.sync_playwright
+    except ImportError:
+        return None
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+                )
+            )
+            page = context.new_page()
+            page.goto(url, wait_until="networkidle", timeout=timeout_seconds * 1000)
+
+            response = context.request.get(url, timeout=timeout_seconds * 1000)
+            if response.ok:
+                data = response.body()
+                content_type = response.headers.get("content-type", "").lower()
+                if "text/html" not in content_type and b"just a moment" not in data[:4000].lower():
+                    browser.close()
+                    return data
+            browser.close()
+    except Exception:
+        return None
+
+    return None
+
+
+def download_voorraad_file(url: str, timeout_seconds: int = 60) -> bytes:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/csv,application/octet-stream,*/*",
+    }
+    response = httpx.get(url, headers=headers, timeout=timeout_seconds, follow_redirects=True)
+    response.raise_for_status()
+
+    if _is_cloudflare_challenge(response):
+        fallback_data = _download_with_playwright(url, timeout_seconds=timeout_seconds)
+        if fallback_data is not None:
+            return fallback_data
+        raise RuntimeError(
+            "Beekman voorraad_url is protected by Cloudflare challenge. "
+            "Use an allowlisted IP / supplier feed endpoint, or install Playwright as fallback."
+        )
+
+    return response.content
+
+
+voorraad_file = download_voorraad_file(ini_config.get("beekman", "voorraad_url"))
 
 with open("beekman.csv", "wb") as f:
     f.write(voorraad_file)
@@ -88,20 +160,20 @@ voorraad = (
     )
     .assign(
         stock=lambda x: np.where(
-            x[" Voorraad Ja/Nee"].str.contains("N"), 0, x["stock"]
+            x["Voorraad Ja/Nee"].str.contains("N"), 0, x["stock"]
         ),  # als voorraad nee geeft is er geen natuurlijk geen voorraad
     )
     .assign(
         stock=lambda x: np.where(x["Inactief code"].str.contains("NIETLEVERBAAR"), 0, x["stock"]),
     )
     .query("stock > 0")
+    .query('group != "Koelkast"')
     # .query("ean > 10000000") Ik zie ook zonder ean verkocht worden
     .replace(
         {
             "group": {
                 "Wasmachine": "Accessoires wassen & drogen",
                 "Vaatwasser": "Accessoires vaatwassers",
-                "Koelkast": "Accessoires koelkasten",
                 "Wasdroger": "Accessoires wassen & drogen",
             }
         }
@@ -116,20 +188,6 @@ basis_voorraad.to_csv(f"{scraper_name}_{date_now}.csv", index=False, encoding="u
 
 latest_file = max(Path.cwd().glob(f"{scraper_name}_*.csv"), key=os.path.getctime)
 save_to_dropbox(latest_file, scraper_name)
-get_orgineel_numbers = pd.read_csv(max(Path.cwd().glob("beekman*.csv"), key=os.path.getctime),sep=";", low_memory=False,usecols=["EAN barcode","EAN_extra_1","Origineel nr"]).rename(columns={"Origineel nr":'origineel_nr'})
-
-normale_ean = get_orgineel_numbers[['origineel_nr', 'EAN barcode']].rename(columns={'EAN barcode': 'ean'})
-extra_ean = get_orgineel_numbers[['origineel_nr', 'EAN_extra_1']].rename(columns={'EAN_extra_1': 'ean'})
-orgineelnummers = (
-    pd.concat([normale_ean, extra_ean])
-    .dropna(subset=['ean']) 
-    .query('ean.str.isdigit()')  # Keep only rows where 'ean' is all digits
-    .assign(ean=lambda x: pd.to_numeric(x['ean'], errors='coerce'))  
-    .query('ean.notna() & ean <= 999999999999999') 
-    .astype({'ean': 'int'})
-    .set_index('ean')
-)
-orgineelnummers.to_sql(name="orgineelnummers", con=engine, if_exists="replace")
 
 os.remove("beekman.csv")
 
